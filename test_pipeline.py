@@ -33,7 +33,7 @@ def process_pdf(pdf_path: str, claim_id: str = "CLM-TEST-001"):
     with open(pdf_path, "rb") as f:
         response = requests.post(
             f"{BASE_URL}/api/process",
-            data={"claim_id": claim_id},
+            data={"claimId": claim_id},
             files={"file": (os.path.basename(pdf_path), f, "application/pdf")},
             timeout=300,
         )

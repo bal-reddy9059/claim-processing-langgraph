@@ -123,14 +123,14 @@ python test_pipeline.py final_image_protected.pdf
 Or with curl (Windows PowerShell):
 ```powershell
 curl -X POST http://localhost:8000/api/process `
-  -F "claim_id=CLM-2024-001" `
+  -F "claimId=CLM-2024-001" `
   -F "file=@final_image_protected.pdf"
 ```
 
 Or with curl (bash):
 ```bash
 curl -X POST http://localhost:8000/api/process \
-  -F "claim_id=CLM-2024-001" \
+  -F "claimId=CLM-2024-001" \
   -F "file=@final_image_protected.pdf"
 ```
 
@@ -142,14 +142,14 @@ curl -X POST http://localhost:8000/api/process \
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `claim_id` | string (form) | Unique claim identifier |
+| `claimId` | string (form) | Unique claim identifier |
 | `file` | PDF (form) | Insurance claim PDF |
 
 ### Sample Response
 
 ```json
 {
-  "claim_id": "CLM-2024-001",
+  "claimId": "CLM-2024-001",
   "status": "success",
   "page_classification": {
     "1": "identity_document",
@@ -217,6 +217,38 @@ curl -X POST http://localhost:8000/api/process \
 
 ---
 
+## Complete API Reference (14 Endpoints)
+
+### System (2)
+- `GET /health` — Health check
+- `GET /api/workflow-info` — Workflow structure & metadata
+
+### Processing (1)
+- `POST /api/process` — Upload PDF and extract data
+
+### Claim Management (4)
+- `GET /api/claims/{claimId}` — Get claim details & status
+- `GET /api/claims/{claimId}/extraction-results` — Get extracted data
+- `PUT /api/claims/{claimId}/extraction-results` — Update extracted fields (manual editing)
+- `GET /api/claims/{claimId}/document-breakdown` — Get page classifications
+
+### Claim Actions (2)
+- `POST /api/claims/{claimId}/approve` — Approve processed claim
+- `POST /api/claims/{claimId}/export` — Export claim as PDF
+
+### Pipeline Control (3)
+- `GET /api/pipeline/status/{claimId}` — Real-time execution status
+- `POST /api/pipeline/pause/{claimId}` — Pause pipeline
+- `POST /api/pipeline/restart/{claimId}` — Restart pipeline
+
+### Settings (2)
+- `GET /api/settings/configuration` — Get system settings
+- `PUT /api/settings/configuration` — Update system settings
+
+**See [API_REFERENCE.md](./API_REFERENCE.md) for detailed request/response schemas.**
+
+---
+
 ## Tech Stack
 
 | Component | Technology |
@@ -232,7 +264,7 @@ curl -X POST http://localhost:8000/api/process \
 
 ## How It Works
 
-1. **Upload** — Client sends a PDF + claim_id to `POST /api/process`
+1. **Upload** — Client sends a PDF + `claimId` to `POST /api/process`
 2. **Count** — Server validates the PDF and counts pages
 3. **Segregate** — `segregator_node` renders each page as PNG and asks Gemini: *"What type of document is this?"*
 4. **Route** — Page numbers are bucketed: `id_pages`, `discharge_pages`, `bill_pages`
