@@ -53,7 +53,10 @@ app.add_middleware(
     allow_origins=[
         "https://stitchmultiagentclaimprocessingpipeline-7w3imtmse.vercel.app",
         "https://medical-claim-processor-frontend.vercel.app",
+        "https://medical-claim-processor-frontend-paez-dfzrok4ik.vercel.app",
+        "https://medical-claim-processor-frontend-pa.vercel.app",
         "http://localhost:3000",
+        "http://localhost:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
