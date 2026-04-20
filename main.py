@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -56,7 +57,7 @@ app.add_middleware(
         "http://localhost:5173",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
 )
 
@@ -192,8 +193,9 @@ async def workflow_info():
     response_description="Structured JSON with classified pages and extracted data",
 )
 async def process_claim(
-    claim_id: str,
-    file: UploadFile = File(description="PDF insurance claim file"),
+    request: Request,
+    claim_id: str | None = Form(None),
+    file: UploadFile | None = File(None),
 ):
     """
     Upload a PDF insurance claim and receive fully extracted structured data.
@@ -204,21 +206,50 @@ async def process_claim(
     3. Results are merged by the Aggregator node
     4. Structured JSON is returned
     """
-    claim_id = _normalize_claim_id(claim_id)
-    log.info("📄 Received claim: %s | File: %s", claim_id, file.filename)
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        body = await request.json()
+        claim_id = _normalize_claim_id(body.get("claim_id", "")) if body.get("claim_id") else None
+        file_data = body.get("file")
+        if not file_data:
+            raise HTTPException(status_code=400, detail="file is required")
+
+        if isinstance(file_data, str) and file_data.startswith("data:"):
+            file_data = file_data.split(",", 1)[1]
+
+        try:
+            pdf_bytes = base64.b64decode(file_data, validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not decode base64 file data: {exc}") from exc
+
+        log.info("📄 Received claim: %s | JSON upload", claim_id)
+    else:
+        if not claim_id:
+            raise HTTPException(status_code=400, detail="claim_id is required")
+        if file is None:
+            raise HTTPException(status_code=400, detail="Uploaded file is required")
+
+        claim_id = _normalize_claim_id(claim_id)
+        log.info("📄 Received claim: %s | File: %s", claim_id, file.filename)
+
+        if claim_id in processing_claims:
+            return {"status": "already_processing", "claim_id": claim_id}
+
+        if not (
+            file.content_type == "application/pdf"
+            or (file.filename and file.filename.lower().endswith(".pdf"))
+        ):
+            raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
+
+        pdf_bytes = await file.read()
+        if not pdf_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    if not claim_id:
+        raise HTTPException(status_code=400, detail="claim_id is required")
 
     if claim_id in processing_claims:
         return {"status": "already_processing", "claim_id": claim_id}
-
-    if not (
-        file.content_type == "application/pdf"
-        or (file.filename and file.filename.lower().endswith(".pdf"))
-    ):
-        raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
-
-    pdf_bytes = await file.read()
-    if not pdf_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
         from utils.pdf_utils import get_pdf_page_count
