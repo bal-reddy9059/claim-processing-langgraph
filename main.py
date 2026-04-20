@@ -50,11 +50,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_origins=[
-        "https://stitchmultiagentclaimprocessingpipeline-7w3imtmse.vercel.app",
-        "https://medical-claim-processor-frontend.vercel.app",
-        "https://medical-claim-processor-frontend-paez-dfzrok4ik.vercel.app",
-        "https://medical-claim-processor-frontend-pa.vercel.app",
         "http://localhost:3000",
         "http://localhost:5173",
     ],
@@ -104,10 +101,15 @@ def _append_pipeline_log(claimId: str, level: str, message: str) -> None:
 claims_store: dict = _load_store(CLAIMS_STORE_FILE)
 pipeline_store: dict = _load_store(PIPELINE_STORE_FILE)
 pipeline_logs_store: dict = _load_store(PIPELINE_LOGS_FILE)
+processing_claims: set[str] = set()
 
 
 def _normalize_claim_id(claimId: str) -> str:
     return claimId.strip()
+
+
+def _get_claim(claimId: str) -> dict | None:
+    return claims_store.get(_normalize_claim_id(claimId))
 
 
 def _has_pipeline_context(claimId: str) -> bool:
@@ -205,6 +207,9 @@ async def process_claim(
     claim_id = _normalize_claim_id(claim_id)
     log.info("📄 Received claim: %s | File: %s", claim_id, file.filename)
 
+    if claim_id in processing_claims:
+        return {"status": "already_processing", "claim_id": claim_id}
+
     if not (
         file.content_type == "application/pdf"
         or (file.filename and file.filename.lower().endswith(".pdf"))
@@ -229,10 +234,12 @@ async def process_claim(
     if page_count == 0:
         raise HTTPException(status_code=400, detail="PDF contains no pages.")
 
-    log.info("📑 Pages detected: %d | Starting LangGraph workflow…", page_count)
-    start_time = time.time()
+    processing_claims.add(claim_id)
+    try:
+        log.info("📑 Pages detected: %d | Starting LangGraph workflow…", page_count)
+        start_time = time.time()
 
-    initial_state = {
+        initial_state = {
         "claim_id": claim_id,
         "pdf_bytes": pdf_bytes,
         "total_pages": page_count,
@@ -246,7 +253,6 @@ async def process_claim(
         "final_output": {},
     }
 
-    try:
         from workflow import build_workflow
 
         workflow = build_workflow()
@@ -282,6 +288,8 @@ async def process_claim(
         raise HTTPException(
             status_code=500, detail=f"Workflow processing failed: {exc}"
         ) from exc
+    finally:
+        processing_claims.discard(claim_id)
 
 
 # ============================================================================
@@ -429,37 +437,47 @@ async def get_dashboard_metrics():
     "/api/claims/{claimId}/history",
     tags=["Claims"],
     summary="Get processing history for a claim",
-    response_model=list[PipelineLogEntry],
 )
 async def get_claim_history(claimId: str):
-    """Return the stored pipeline history/log for a specific claim."""
+    """Return processing history for a specific claim."""
     claimId = _normalize_claim_id(claimId)
     if not _has_pipeline_context(claimId):
         raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
-    raw_history = pipeline_logs_store.get(claimId, [])
-    return [PipelineLogEntry(**entry) for entry in raw_history]
+
+    history = pipeline_logs_store.get(claimId, [])
+    return {"history": history}
 
 
 @app.get(
     "/api/claims/{claimId}/extraction-results",
     tags=["Claims"],
-    summary="Get extracted data for a claim",
-    response_model=ExtractionResults,
+    summary="Get extracted results for a claim",
 )
 async def get_extraction_results(claimId: str):
-    """Retrieve extracted identity, discharge, and billing data."""
+    """Return pre-extracted data for a specific claim."""
     claimId = _normalize_claim_id(claimId)
-    if claimId not in claims_store:
+    if not _has_pipeline_context(claimId):
         raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
-    
+
     claim = claims_store[claimId]
-    extracted = claim.get("extracted_data", {})
-    
-    return ExtractionResults(
-        identity=IdentityData(**extracted.get("identity", {})),
-        discharge_summary=DischargeSummaryData(**extracted.get("discharge_summary", {})),
-        itemized_bill=ItemizedBillData(**extracted.get("itemized_bill", {})),
-    )
+    results = claim.get("extracted_data", {})
+    return {"results": results}
+
+
+@app.get(
+    "/api/claims/{claimId}/document-breakdown",
+    tags=["Claims"],
+    summary="Get document breakdown for a claim",
+)
+async def get_document_breakdown(claimId: str):
+    """Return page classification breakdown for a specific claim."""
+    claimId = _normalize_claim_id(claimId)
+    if not _has_pipeline_context(claimId):
+        raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
+
+    claim = claims_store[claimId]
+    breakdown = claim.get("page_classification", {})
+    return {"breakdown": breakdown}
 
 
 @app.put(
