@@ -9,7 +9,7 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -285,24 +285,50 @@ async def run_pipeline(claim_id: str, file_data: bytes | str) -> dict:
     response_description="Structured JSON with classified pages and extracted data",
 )
 async def process_claim(
-    claim_id: str = Form(...),
+    request: Request,
+    claim_id: str | None = Form(None),
     file: UploadFile | None = File(None),
 ):
-    log.info("/api/process request received: claim_id=%s file=%s", claim_id, file.filename if file else None)
+    file_data = None
+    if file is not None:
+        try:
+            file_data = await file.read()
+        except Exception as exc:
+            log.exception("Failed reading uploaded file for claim %s", claim_id)
+            raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
+
+    if not claim_id or file_data is None:
+        # Try to recover from alternate multipart payload shape or JSON body.
+        try:
+            form = await request.form()
+            claim_id = claim_id or form.get("claim_id") or form.get("claimId")
+            if file is None:
+                file = form.get("file")
+            if file is not None and hasattr(file, "read"):
+                file_data = await file.read()
+        except Exception:
+            pass
+
+    if not claim_id:
+        try:
+            body = await request.json()
+            claim_id = claim_id or body.get("claim_id") or body.get("claimId")
+            if file_data is None:
+                file_content = body.get("file") or body.get("file_data")
+                if isinstance(file_content, str):
+                    if file_content.startswith("data:"):
+                        file_content = file_content.split(",", 1)[1]
+                    file_data = base64.b64decode(file_content)
+        except Exception:
+            pass
 
     if not claim_id:
         raise HTTPException(status_code=400, detail="claim_id is required")
 
-    try:
-        file_data = await file.read() if file else None
-    except Exception as exc:
-        log.exception("Failed reading uploaded file for claim %s", claim_id)
-        raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
-
-    if file is None or not file_data:
+    if file_data is None or len(file_data) == 0:
         raise HTTPException(status_code=400, detail="file is required")
 
-    log.info("/api/process payload: claim_id=%s file_size=%d bytes", claim_id, len(file_data))
+    log.info("/api/process request received: claim_id=%s file_size=%d bytes", claim_id, len(file_data))
 
     try:
         result = await run_pipeline(claim_id=claim_id, file_data=file_data)
