@@ -128,6 +128,34 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
+## Deploy to Vercel
+
+This project is ready to deploy on Vercel using the FastAPI Python runtime.
+
+1. Install the Vercel CLI or connect your Git repository.
+2. Set the required environment variable in your Vercel project:
+
+```bash
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+3. Deploy from the `claims_pipeline` directory.
+
+Vercel will detect `main.py` as the ASGI application entrypoint and use `requirements.txt` to install dependencies.
+
+If you deploy using the Vercel dashboard, add `GEMINI_API_KEY` under **Settings › Environment Variables**.
+
+The Vercel configuration file `vercel.json` is included in this repository to route all requests to `main.py`.
+
+### Vercel endpoints
+- `GET /health`
+- `GET /api/workflow-info`
+- `POST /api/process?claim_id={id}`
+
+### Important notes
+- Data stored in `data/` is local to the serverless instance and is not persistent across deployments.
+- For production use, replace the JSON file storage with a proper database.
+
 ### Access Points
 - **API Documentation** → http://localhost:8000/docs
 - **Alternative Docs** → http://localhost:8000/redoc

@@ -1,0 +1,14 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.DS_Store
+.env
+data/
+final_image_protected.pdf
+test_pipeline.py
+README.md
+API_REFERENCE.md
