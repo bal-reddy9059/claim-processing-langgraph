@@ -9,7 +9,7 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -186,70 +186,21 @@ async def workflow_info():
     }
 
 
-@app.post(
-    "/api/process",
-    tags=["Claims"],
-    summary="Process a PDF insurance claim",
-    response_description="Structured JSON with classified pages and extracted data",
-)
-async def process_claim(
-    request: Request,
-    claim_id: str | None = Form(None),
-    file: UploadFile | None = File(None),
-):
-    """
-    Upload a PDF insurance claim and receive fully extracted structured data.
+async def _decode_file_data(file_data: str) -> bytes:
+    if isinstance(file_data, str) and file_data.startswith("data:"):
+        file_data = file_data.split(",", 1)[1]
+    try:
+        return base64.b64decode(file_data, validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not decode base64 file data: {exc}") from exc
 
-    **Workflow:**
-    1. Each page is classified by the Segregator Agent (AI Vision)
-    2. Relevant pages are routed to ID, Discharge, and Bill agents **in parallel**
-    3. Results are merged by the Aggregator node
-    4. Structured JSON is returned
-    """
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith("application/json"):
-        body = await request.json()
-        claim_id = _normalize_claim_id(body.get("claim_id", "")) if body.get("claim_id") else None
-        file_data = body.get("file")
-        if not file_data:
-            raise HTTPException(status_code=400, detail="file is required")
 
-        if isinstance(file_data, str) and file_data.startswith("data:"):
-            file_data = file_data.split(",", 1)[1]
-
-        try:
-            pdf_bytes = base64.b64decode(file_data, validate=True)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Could not decode base64 file data: {exc}") from exc
-
-        log.info("📄 Received claim: %s | JSON upload", claim_id)
-    else:
-        if not claim_id:
-            raise HTTPException(status_code=400, detail="claim_id is required")
-        if file is None:
-            raise HTTPException(status_code=400, detail="Uploaded file is required")
-
-        claim_id = _normalize_claim_id(claim_id)
-        log.info("📄 Received claim: %s | File: %s", claim_id, file.filename)
-
-        if claim_id in processing_claims:
-            return {"status": "already_processing", "claim_id": claim_id}
-
-        if not (
-            file.content_type == "application/pdf"
-            or (file.filename and file.filename.lower().endswith(".pdf"))
-        ):
-            raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
-
-        pdf_bytes = await file.read()
-        if not pdf_bytes:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-
-    if not claim_id:
-        raise HTTPException(status_code=400, detail="claim_id is required")
-
+async def run_pipeline(claim_id: str, file_data: str) -> dict:
+    claim_id = _normalize_claim_id(claim_id)
     if claim_id in processing_claims:
         return {"status": "already_processing", "claim_id": claim_id}
+
+    pdf_bytes = await _decode_file_data(file_data)
 
     try:
         from utils.pdf_utils import get_pdf_page_count
@@ -271,18 +222,18 @@ async def process_claim(
         start_time = time.time()
 
         initial_state = {
-        "claim_id": claim_id,
-        "pdf_bytes": pdf_bytes,
-        "total_pages": page_count,
-        "page_classifications": {},
-        "id_pages": [],
-        "discharge_pages": [],
-        "bill_pages": [],
-        "identity_data": {},
-        "discharge_data": {},
-        "bill_data": {},
-        "final_output": {},
-    }
+            "claim_id": claim_id,
+            "pdf_bytes": pdf_bytes,
+            "total_pages": page_count,
+            "page_classifications": {},
+            "id_pages": [],
+            "discharge_pages": [],
+            "bill_pages": [],
+            "identity_data": {},
+            "discharge_data": {},
+            "bill_data": {},
+            "final_output": {},
+        }
 
         from workflow import build_workflow
 
@@ -293,14 +244,12 @@ async def process_claim(
         output["processing_metadata"]["processing_time_seconds"] = elapsed
         log.info("✅ Claim %s processed in %ss", claim_id, elapsed)
 
-        # Rename claim_id to claimId for frontend compatibility
         output["claimId"] = output.pop("claim_id", claim_id)
 
-        # Store claim details for later retrieval
         claims_store[claim_id] = {
             "claimId": claim_id,
             "status": "completed",
-            "file_name": file.filename,
+            "file_name": None,
             "upload_timestamp": datetime.now().isoformat(),
             "completion_timestamp": datetime.now().isoformat(),
             "page_count": page_count,
@@ -313,7 +262,7 @@ async def process_claim(
         _save_store(CLAIMS_STORE_FILE, claims_store)
         _append_pipeline_log(claim_id, "INFO", "Claim processed successfully")
 
-        return JSONResponse(content=output)
+        return output
     except Exception as exc:
         log.error("❌ Workflow failed for claim %s: %s", claim_id, exc)
         raise HTTPException(
@@ -321,6 +270,26 @@ async def process_claim(
         ) from exc
     finally:
         processing_claims.discard(claim_id)
+
+
+@app.post(
+    "/api/process",
+    tags=["Claims"],
+    summary="Process a PDF insurance claim",
+    response_description="Structured JSON with classified pages and extracted data",
+)
+async def process_claim(request: Request):
+    body = await request.json()
+    claim_id = body.get("claim_id")
+    file_data = body.get("file")
+
+    if not claim_id:
+        raise HTTPException(status_code=400, detail="claim_id is required")
+    if not file_data:
+        raise HTTPException(status_code=400, detail="file is required")
+
+    result = await run_pipeline(claim_id=claim_id, file_data=file_data)
+    return {"status": "success", "claim_id": claim_id, "result": result}
 
 
 # ============================================================================
