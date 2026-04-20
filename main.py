@@ -449,17 +449,17 @@ async def get_claim_history(claimId: str):
 
 
 @app.get(
-    "/api/claims/{claimId}/extraction-results",
+    "/api/claims/{claim_id}/extraction-results",
     tags=["Claims"],
     summary="Get extracted results for a claim",
 )
-async def get_extraction_results(claimId: str):
+async def get_extraction_results(claim_id: str):
     """Return pre-extracted data for a specific claim."""
-    claimId = _normalize_claim_id(claimId)
-    if not _has_pipeline_context(claimId):
-        raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
+    claim_id = _normalize_claim_id(claim_id)
+    if not _has_pipeline_context(claim_id):
+        raise HTTPException(status_code=404, detail=f"Claim {claim_id} not found")
 
-    claim = claims_store[claimId]
+    claim = claims_store[claim_id]
     results = claim.get("extracted_data", {})
     return {"results": results}
 
