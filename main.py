@@ -49,6 +49,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
+@app.middleware("http")
+async def catch_exceptions_middleware(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as exc:
+        log.exception("Unhandled exception on %s %s", request.method, request.url)
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://.*\.vercel\.app",
@@ -109,7 +118,7 @@ processing_claims: set[str] = set()
 
 
 def _normalize_claim_id(claimId: str) -> str:
-    return claimId.strip()
+    return claimId.strip().upper()
 
 
 def _get_claim(claimId: str) -> dict | None:
@@ -289,50 +298,79 @@ async def process_claim(
     claim_id: str | None = Form(None),
     file: UploadFile | None = File(None),
 ):
+    file_name = None
     file_data = None
+
+    claim_id = claim_id or request.query_params.get("claim_id") or request.query_params.get("claimId")
+
     if file is not None:
+        file_name = file.filename
         try:
             file_data = await file.read()
         except Exception as exc:
             log.exception("Failed reading uploaded file for claim %s", claim_id)
             raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
 
-    if not claim_id or file_data is None:
-        # Try to recover from alternate multipart payload shape or JSON body.
-        try:
-            form = await request.form()
-            claim_id = claim_id or form.get("claim_id") or form.get("claimId")
-            if file is None:
-                file = form.get("file")
-            if file is not None and hasattr(file, "read"):
-                file_data = await file.read()
-        except Exception:
-            pass
+    else:
+        content_type = request.headers.get("content-type", "")
+        if content_type.startswith("multipart/form-data"):
+            try:
+                form = await request.form()
+            except Exception as exc:
+                log.exception("Failed to parse multipart/form-data request")
+                raise HTTPException(status_code=400, detail="Invalid multipart/form-data payload") from exc
 
-    if not claim_id:
-        try:
-            body = await request.json()
+            claim_id = claim_id or form.get("claim_id") or form.get("claimId")
+            file_input = form.get("file") or form.get("file_data")
+            if file_input is not None:
+                if hasattr(file_input, "read"):
+                    file_name = getattr(file_input, "filename", None)
+                    try:
+                        file_data = await file_input.read()
+                    except Exception as exc:
+                        log.exception("Failed reading uploaded file for claim %s", claim_id)
+                        raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
+                elif isinstance(file_input, (bytes, bytearray)):
+                    file_data = bytes(file_input)
+                elif isinstance(file_input, str):
+                    if file_input.startswith("data:"):
+                        file_input = file_input.split(",", 1)[1]
+                    try:
+                        file_data = base64.b64decode(file_input, validate=True)
+                    except Exception as exc:
+                        raise HTTPException(status_code=400, detail=f"Could not decode base64 file data: {exc}") from exc
+
+        else:
+            try:
+                body = await request.json()
+            except Exception as exc:
+                log.exception("Failed to parse JSON body for /api/process request")
+                raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
             claim_id = claim_id or body.get("claim_id") or body.get("claimId")
-            if file_data is None:
-                file_content = body.get("file") or body.get("file_data")
-                if isinstance(file_content, str):
+            file_content = body.get("file") or body.get("file_data")
+            if file_content is not None:
+                if isinstance(file_content, (bytes, bytearray)):
+                    file_data = bytes(file_content)
+                elif isinstance(file_content, str):
                     if file_content.startswith("data:"):
                         file_content = file_content.split(",", 1)[1]
-                    file_data = base64.b64decode(file_content)
-        except Exception:
-            pass
+                    try:
+                        file_data = base64.b64decode(file_content, validate=True)
+                    except Exception as exc:
+                        raise HTTPException(status_code=400, detail=f"Could not decode base64 file data: {exc}") from exc
 
     if not claim_id:
         raise HTTPException(status_code=400, detail="claim_id is required")
 
-    if file_data is None or len(file_data) == 0:
+    if not file_data:
         raise HTTPException(status_code=400, detail="file is required")
 
-    log.info("/api/process request received: claim_id=%s file_size=%d bytes", claim_id, len(file_data))
+    log.info("/api/process request received: claim_id=%s file_name=%s file_size=%d bytes", claim_id, file_name, len(file_data))
 
     try:
         result = await run_pipeline(claim_id=claim_id, file_data=file_data)
-        return {"status": "success", "claim_id": claim_id, "result": result}
+        return result
     except HTTPException:
         raise
     except Exception as exc:
@@ -343,6 +381,16 @@ async def process_claim(
 # ============================================================================
 # CLAIM MANAGEMENT ENDPOINTS
 # ============================================================================
+
+
+@app.get(
+    "/api/summary",
+    tags=["Claims"],
+    summary="Get dashboard summary (alias)",
+)
+async def get_claims_summary_alias():
+    """Return dashboard metrics and recent claims (alias for /api/claims/summary)."""
+    return await get_claims_summary()
 
 
 @app.get(
@@ -402,8 +450,20 @@ async def get_claims_summary():
 async def get_claim_details(claimId: str):
     """Fetch claim details, status, and processing metadata."""
     claimId = _normalize_claim_id(claimId)
+    
+    # Return empty/default response if claim doesn't exist (graceful degradation)
     if claimId not in claims_store:
-        raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
+        return ClaimDetailsResponse(
+            claimId=claimId,
+            status="not_found",
+            file_name=None,
+            upload_timestamp=None,
+            completion_timestamp=None,
+            page_count=0,
+            pages_by_type={},
+            agents_invoked=[],
+            processing_time_seconds=None,
+        )
     
     claim = claims_store[claimId]
     return ClaimDetailsResponse(
@@ -446,28 +506,49 @@ async def list_claims():
 @app.get(
     "/api/extraction-results",
     tags=["Claims"],
-    summary="Get extraction results placeholder",
+    summary="Get extraction results (with query parameter)",
 )
-async def get_extraction_results_alias():
-    return {"results": []}
+async def get_extraction_results_alias(claimId: str = None):
+    if not claimId:
+        return {"results": []}
+    try:
+        return await get_extraction_results(claimId)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return {"results": []}
+        raise
 
 
 @app.get(
     "/api/document-breakdown",
     tags=["Claims"],
-    summary="Get document breakdown placeholder",
+    summary="Get document breakdown (with query parameter)",
 )
-async def get_document_breakdown_alias():
-    return {"breakdown": []}
+async def get_document_breakdown_alias(claimId: str = None):
+    if not claimId:
+        return {"breakdown": []}
+    try:
+        return await get_document_breakdown(claimId)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return {"breakdown": []}
+        raise
 
 
 @app.get(
     "/api/history",
     tags=["Claims"],
-    summary="Get history placeholder",
+    summary="Get history (with query parameter)",
 )
-async def get_history_alias():
-    return {"history": []}
+async def get_history_alias(claimId: str = None):
+    if not claimId:
+        return {"history": []}
+    try:
+        return await get_claim_history(claimId)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return {"history": []}
+        raise
 
 
 @app.get(
@@ -489,8 +570,10 @@ async def get_dashboard_metrics():
 async def get_claim_history(claimId: str):
     """Return processing history for a specific claim."""
     claimId = _normalize_claim_id(claimId)
+    
+    # Return empty history if claim doesn't exist (graceful degradation)
     if not _has_pipeline_context(claimId):
-        raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
+        return {"history": []}
 
     history = pipeline_logs_store.get(claimId, [])
     return {"history": history}
@@ -504,28 +587,14 @@ async def get_claim_history(claimId: str):
 async def get_extraction_results(claim_id: str):
     """Return pre-extracted data for a specific claim."""
     claim_id = _normalize_claim_id(claim_id)
+    
+    # Return empty results if claim doesn't exist (graceful degradation)
     if not _has_pipeline_context(claim_id):
-        raise HTTPException(status_code=404, detail=f"Claim {claim_id} not found")
+        return {"results": {}}
 
-    claim = claims_store[claim_id]
+    claim = claims_store.get(claim_id, {})
     results = claim.get("extracted_data", {})
     return {"results": results}
-
-
-@app.get(
-    "/api/claims/{claimId}/document-breakdown",
-    tags=["Claims"],
-    summary="Get document breakdown for a claim",
-)
-async def get_document_breakdown(claimId: str):
-    """Return page classification breakdown for a specific claim."""
-    claimId = _normalize_claim_id(claimId)
-    if not _has_pipeline_context(claimId):
-        raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
-
-    claim = claims_store[claimId]
-    breakdown = claim.get("page_classification", {})
-    return {"breakdown": breakdown}
 
 
 @app.put(
@@ -564,8 +633,15 @@ async def update_extraction_results(claimId: str, updates: dict):
 async def get_document_breakdown(claimId: str):
     """Get page-by-page classification breakdown."""
     claimId = _normalize_claim_id(claimId)
+    
+    # Return empty breakdown if claim doesn't exist (graceful degradation)
     if claimId not in claims_store:
-        raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
+        return DocumentBreakdown(
+            claimId=claimId,
+            total_pages=0,
+            page_classifications={},
+            document_types_found=[],
+        )
     
     claim = claims_store[claimId]
     page_class = claim.get("page_classification", {})
@@ -591,6 +667,23 @@ async def get_document_breakdown(claimId: str):
 
 
 @app.post(
+    "/api/approve",
+    tags=["Claims"],
+    summary="Approve a claim (with query parameter)",
+)
+async def approve_claim_alias(claimId: str = None):
+    """Approve the processed claim for next stage (query parameter version)."""
+    if not claimId:
+        raise HTTPException(status_code=400, detail="claimId query parameter is required")
+    try:
+        return await approve_claim(claimId)
+    except HTTPException as e:
+        if e.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
+        raise
+
+
+@app.post(
     "/api/claims/{claimId}/approve",
     tags=["Claims"],
     summary="Approve a processed claim",
@@ -611,6 +704,21 @@ async def approve_claim(claimId: str):
         approved_at=datetime.now().isoformat(),
         message=f"Claim {claimId} has been approved",
     )
+
+
+@app.post(
+    "/api/export",
+    tags=["Claims"],
+    summary="Export claim as PDF (with query parameter)",
+)
+async def export_claim_alias(claimId: str = None):
+    """Generate and provide download link for claim PDF (query parameter version)."""
+    if not claimId:
+        raise HTTPException(status_code=400, detail="claimId query parameter is required")
+    try:
+        return await export_claim(claimId)
+    except HTTPException:
+        raise
 
 
 @app.post(
@@ -638,6 +746,21 @@ async def export_claim(claimId: str):
 # ============================================================================
 # PIPELINE CONTROL
 # ============================================================================
+
+
+@app.get(
+    "/api/pipeline/status",
+    tags=["Pipeline"],
+    summary="Get pipeline status (with query parameter)",
+)
+async def get_pipeline_status_alias(claimId: str = None):
+    """Get current pipeline status and step progress (query parameter version)."""
+    if not claimId:
+        raise HTTPException(status_code=400, detail="claimId query parameter is required")
+    try:
+        return await get_pipeline_status(claimId)
+    except HTTPException:
+        raise
 
 
 @app.get(
@@ -737,6 +860,23 @@ async def get_pipeline_status(claimId: str):
 
 
 @app.get(
+    "/api/pipeline/logs",
+    tags=["Pipeline"],
+    summary="Get pipeline logs (with query parameter)",
+)
+async def get_pipeline_logs_alias(claimId: str = None):
+    """Return the stored pipeline logs for the given claim (query parameter version)."""
+    if not claimId:
+        return []
+    try:
+        return await get_pipeline_logs(claimId)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return []
+        raise
+
+
+@app.get(
     "/api/pipeline/logs/{claimId}",
     tags=["Pipeline"],
     summary="Get live pipeline logs for a claim",
@@ -749,6 +889,21 @@ async def get_pipeline_logs(claimId: str):
         raise HTTPException(status_code=404, detail=f"Claim {claimId} not found")
     raw_logs = pipeline_logs_store.get(claimId, [])
     return [PipelineLogEntry(**entry) for entry in raw_logs]
+
+
+@app.post(
+    "/api/pipeline/pause",
+    tags=["Pipeline"],
+    summary="Pause pipeline (with query parameter)",
+)
+async def pause_pipeline_alias(claimId: str = None):
+    """Pause the pipeline execution for a claim (query parameter version)."""
+    if not claimId:
+        raise HTTPException(status_code=400, detail="claimId query parameter is required")
+    try:
+        return await pause_pipeline(claimId)
+    except HTTPException:
+        raise
 
 
 @app.post(
@@ -776,6 +931,21 @@ async def pause_pipeline(claimId: str):
         status="paused",
         message=f"Pipeline for claim {claimId} has been paused",
     )
+
+
+@app.post(
+    "/api/pipeline/restart",
+    tags=["Pipeline"],
+    summary="Restart pipeline (with query parameter)",
+)
+async def restart_pipeline_alias(claimId: str = None):
+    """Restart the pipeline for a claim (query parameter version)."""
+    if not claimId:
+        raise HTTPException(status_code=400, detail="claimId query parameter is required")
+    try:
+        return await restart_pipeline(claimId)
+    except HTTPException:
+        raise
 
 
 @app.post(
@@ -820,6 +990,16 @@ async def restart_pipeline(claimId: str):
 
 
 @app.get(
+    "/api/configuration",
+    tags=["Settings"],
+    summary="Get system settings (alias)",
+)
+async def get_settings_alias():
+    """Retrieve current system configuration (alias for /api/settings/configuration)."""
+    return await get_settings()
+
+
+@app.get(
     "/api/settings/configuration",
     tags=["Settings"],
     summary="Get system settings",
@@ -834,6 +1014,16 @@ async def get_settings():
         enable_email_notifications=False,
         batch_processing_enabled=True,
     )
+
+
+@app.put(
+    "/api/configuration",
+    tags=["Settings"],
+    summary="Save system settings (alias)",
+)
+async def update_settings_alias(settings: SystemSettings):
+    """Update system configuration (alias for /api/settings/configuration)."""
+    return await update_settings(settings)
 
 
 @app.put(
