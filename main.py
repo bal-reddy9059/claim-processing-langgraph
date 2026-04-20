@@ -14,8 +14,6 @@ from fastapi.responses import JSONResponse
 
 load_dotenv()
 
-from utils.pdf_utils import get_pdf_page_count
-from workflow import build_workflow
 from models.api_responses import (
     ApprovalResponse,
     ClaimDetailsResponse,
@@ -107,6 +105,11 @@ def _normalize_claim_id(claimId: str) -> str:
 def _has_pipeline_context(claimId: str) -> bool:
     normalized = _normalize_claim_id(claimId)
     return normalized in claims_store or normalized in pipeline_store
+
+
+@app.get("/", tags=["System"], summary="Root")
+async def root():
+    return {"status": "ok", "service": "Claims Processing Pipeline", "message": "FastAPI app is running."}
 
 
 @app.get("/health", tags=["System"], summary="Health check")
@@ -205,6 +208,8 @@ async def process_claim(
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     try:
+        from utils.pdf_utils import get_pdf_page_count
+
         page_count = get_pdf_page_count(pdf_bytes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -234,6 +239,8 @@ async def process_claim(
     }
 
     try:
+        from workflow import build_workflow
+
         workflow = build_workflow()
         result = await asyncio.to_thread(workflow.invoke, initial_state)
         elapsed = round(time.time() - start_time, 2)
