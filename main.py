@@ -288,18 +288,30 @@ async def process_claim(
     claim_id: str = Form(...),
     file: UploadFile | None = File(None),
 ):
+    log.info("/api/process request received: claim_id=%s file=%s", claim_id, file.filename if file else None)
+
     if not claim_id:
         raise HTTPException(status_code=400, detail="claim_id is required")
 
-    file_data = await file.read() if file else None
+    try:
+        file_data = await file.read() if file else None
+    except Exception as exc:
+        log.exception("Failed reading uploaded file for claim %s", claim_id)
+        raise HTTPException(status_code=500, detail=f"Failed to read uploaded file: {exc}") from exc
+
     if file is None or not file_data:
         raise HTTPException(status_code=400, detail="file is required")
+
+    log.info("/api/process payload: claim_id=%s file_size=%d bytes", claim_id, len(file_data))
 
     try:
         result = await run_pipeline(claim_id=claim_id, file_data=file_data)
         return {"status": "success", "claim_id": claim_id, "result": result}
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log.exception("Pipeline failed for claim %s", claim_id)
+        raise HTTPException(status_code=500, detail=f"Pipeline processing failed: {exc}") from exc
 
 
 # ============================================================================
