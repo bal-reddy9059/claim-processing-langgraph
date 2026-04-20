@@ -388,6 +388,33 @@ async def list_claims():
 
 
 @app.get(
+    "/api/extraction-results",
+    tags=["Claims"],
+    summary="Get extraction results placeholder",
+)
+async def get_extraction_results_alias():
+    return {"results": []}
+
+
+@app.get(
+    "/api/document-breakdown",
+    tags=["Claims"],
+    summary="Get document breakdown placeholder",
+)
+async def get_document_breakdown_alias():
+    return {"breakdown": []}
+
+
+@app.get(
+    "/api/history",
+    tags=["Claims"],
+    summary="Get history placeholder",
+)
+async def get_history_alias():
+    return {"history": []}
+
+
+@app.get(
     "/api/dashboard/metrics",
     tags=["Dashboard"],
     summary="Get dashboard metrics",
