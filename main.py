@@ -58,7 +58,11 @@ app.add_middleware(
 )
 
 # Persistent JSON-backed stores for development/demo
-DATA_DIR = Path(__file__).resolve().parent / "data"
+BASE_DIR = Path(__file__).resolve().parent
+if os.getenv("VERCEL") or not os.access(BASE_DIR, os.W_OK):
+    DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/claims_pipeline_data"))
+else:
+    DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CLAIMS_STORE_FILE = DATA_DIR / "claims_store.json"
 PIPELINE_STORE_FILE = DATA_DIR / "pipeline_store.json"

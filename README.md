@@ -154,6 +154,7 @@ The Vercel configuration file `vercel.json` is included in this repository to ro
 
 ### Important notes
 - Data stored in `data/` is local to the serverless instance and is not persistent across deployments.
+- On Vercel, runtime storage uses `/tmp` so the claim storage is ephemeral and will not survive cold restarts.
 - For production use, replace the JSON file storage with a proper database.
 
 ### Access Points
