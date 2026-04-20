@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -35,6 +36,21 @@ app = FastAPI(
     title="Claims Processing Pipeline",
     description="Minimal Vercel app entrypoint for the claims pipeline.",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origins=[
+        "https://medical-claim-processor-frontend.vercel.app",
+        "https://medical-claim-processor-frontend-paez-dfzrok4ik.vercel.app",
+        "https://medical-claim-processor-frontend-pa.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
