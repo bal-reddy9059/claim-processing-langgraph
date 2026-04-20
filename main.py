@@ -9,7 +9,7 @@ from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -53,11 +53,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_origins=[
-        "http://localhost:3000",
         "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:4173",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "*"],
     allow_headers=["*"],
 )
 
@@ -195,12 +198,15 @@ async def _decode_file_data(file_data: str) -> bytes:
         raise HTTPException(status_code=400, detail=f"Could not decode base64 file data: {exc}") from exc
 
 
-async def run_pipeline(claim_id: str, file_data: str) -> dict:
+async def run_pipeline(claim_id: str, file_data: bytes | str) -> dict:
     claim_id = _normalize_claim_id(claim_id)
     if claim_id in processing_claims:
         return {"status": "already_processing", "claim_id": claim_id}
 
-    pdf_bytes = await _decode_file_data(file_data)
+    if isinstance(file_data, bytes):
+        pdf_bytes = file_data
+    else:
+        pdf_bytes = await _decode_file_data(file_data)
 
     try:
         from utils.pdf_utils import get_pdf_page_count
@@ -278,18 +284,22 @@ async def run_pipeline(claim_id: str, file_data: str) -> dict:
     summary="Process a PDF insurance claim",
     response_description="Structured JSON with classified pages and extracted data",
 )
-async def process_claim(request: Request):
-    body = await request.json()
-    claim_id = body.get("claim_id")
-    file_data = body.get("file")
-
+async def process_claim(
+    claim_id: str = Form(...),
+    file: UploadFile | None = File(None),
+):
     if not claim_id:
         raise HTTPException(status_code=400, detail="claim_id is required")
-    if not file_data:
+
+    file_data = await file.read() if file else None
+    if file is None or not file_data:
         raise HTTPException(status_code=400, detail="file is required")
 
-    result = await run_pipeline(claim_id=claim_id, file_data=file_data)
-    return {"status": "success", "claim_id": claim_id, "result": result}
+    try:
+        result = await run_pipeline(claim_id=claim_id, file_data=file_data)
+        return {"status": "success", "claim_id": claim_id, "result": result}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ============================================================================
